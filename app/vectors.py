@@ -1,5 +1,4 @@
 from typing import List
-import os
 from app.config import settings
 from google import genai
 from pinecone import Pinecone, ServerlessSpec
@@ -22,8 +21,7 @@ class GeminiEmbedder:
         )
         if hasattr(res, "embeddings"):
             return [e.values for e in res.embeddings]
-        else:
-            return [res.embedding.values]
+        return [res.embedding.values]
 
 
 EMBED_DIM = 768  # keep Pinecone index + Gemini output in sync
@@ -68,21 +66,15 @@ def upsert_chunks(collection_name: str, chunks: list, source_id: str):
     namespace = collection_name
     idx_offset = 0
     for chunk_batch in batched(chunks, BATCH):
-        # Normalize batch: always a list of dicts with "text" and optional "page"
         norm_batch = []
         for c in chunk_batch:
             if isinstance(c, dict):
-                raw_text = c.get("text", "")
-                if not isinstance(raw_text, str):
-                    text = str(raw_text)
-                else:
-                    text = raw_text
-                text = text.strip()
+                text = str(c.get("text", "")).strip()
                 page = c.get("page")
             else:
                 text = str(c).strip()
                 page = None
-            if text:  # ignore empty
+            if text:
                 norm_batch.append({"text": text, "page": page})
         if not norm_batch:
             continue
@@ -92,11 +84,9 @@ def upsert_chunks(collection_name: str, chunks: list, source_id: str):
         for i, vec in enumerate(vectors):
             text_val = norm_batch[i]["text"]
             if isinstance(text_val, dict):
-                # Defensive: extract the text field if it's a dict
                 text_val = text_val.get("text", "")
             elif not isinstance(text_val, str):
                 text_val = str(text_val)
-
             meta = {
                 "text": text_val,
                 "source": source_id,
@@ -135,9 +125,7 @@ def search(collection_name: str, query: str, top_k: int, filter: dict = None):
     docs, metas, dists = [], [], []
     for match in res.matches:
         md = match.metadata or {}
-        # Always append the text string, not the whole dict
         docs.append(md.get("text", ""))
-        # Keep full metadata, including page if present
         meta = {
             "source": md.get("source", ""),
             "chunk_index": int(md.get("chunk_index", -1))
@@ -145,8 +133,6 @@ def search(collection_name: str, query: str, top_k: int, filter: dict = None):
         if "page" in md:
             meta["page"] = md["page"]
         metas.append(meta)
-        # Pinecone gives a similarity score (for cosine). Convert to a "distance-like" number:
-        # distance = 1 - score; later we'll convert back to similarity as (1 - distance).
         dists.append(1.0 - float(match.score)
                      if match.score is not None else 1.0)
 

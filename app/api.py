@@ -1,13 +1,10 @@
-from fastapi.datastructures import UploadFile as UploadFileType
-from fastapi import Depends
-from fastapi import Body
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi import status
 from pydantic import BaseModel
 from pathlib import Path
 from typing import List
-from fastapi.middleware.cors import CORSMiddleware
+from app.cors import setup_cors
 from app import pdf, chunk
 from app.vectors import upsert_chunks, search
 from app.config import settings
@@ -18,16 +15,7 @@ from app.collections import router as collections_router
 
 app = FastAPI(title="RAG x Gemini (Pinecone)", version="0.1.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+setup_cors(app)
 
 app.include_router(collections_router)
 
@@ -68,7 +56,7 @@ async def ingest(
     MAX_FILES = 5
     MAX_SIZE = 50 * 1024 * 1024  # 50MB per file
 
-    if not files or len(files) == 0:
+    if not files:
         raise HTTPException(400, "No files uploaded.")
 
     if len(files) > MAX_FILES:
@@ -141,10 +129,9 @@ async def ingest(
                 if not t:
                     continue
                 chunk_list = chunk.chunk_text(
-                    t, settings.CHUNK_SIZE, settings.CHUNK_OVERLAP
+                    t, settings.CHUNK_SIZE, settings.CHUNK_OVERLAP, page=p
                 )
-                for c in chunk_list:
-                    chunks_with_meta.append({"text": c, "page": p})
+                chunks_with_meta.extend(chunk_list)
 
             if not chunks_with_meta:
                 file_result["error"] = "Chunking produced no chunks (unexpected)."
@@ -179,84 +166,35 @@ async def ingest(
     return resp
 
 
-# Backward compatibility: support single file param as before
-
-
-@app.post("/ingest_single", include_in_schema=False)
-async def ingest_single(
-    collection: str = Form(...),
-    file: UploadFileType = File(...),
-):
-    # Wrap single file in a list and call the main ingest
-    return await ingest(collection=collection, files=[file])
-
-
-@app.post("/ingest_text")
-async def ingest_text(body: IngestTextIn):
-    t = (body.text or "").strip()
-    if len(t) < 50:
-        raise HTTPException(
-            400, "Text too short; need at least ~50 characters.")
-    chunks = chunk.chunk_text(t, settings.CHUNK_SIZE, settings.CHUNK_OVERLAP)
-    if not chunks:
-        raise HTTPException(
-            400, "Chunking produced no chunks from provided text.")
-    try:
-        upsert_chunks(body.collection, chunks, body.source or "inline")
-    except Exception as e:
-        raise HTTPException(
-            500, f"Vector upsert failed: {type(e).__name__}: {e}")
-    return {"ok": True, "collection": body.collection, "source": body.source, "chunks": len(chunks)}
-
-
-@app.post("/query")
-async def query(q: QueryIn):
+def retrieve_context(q: QueryIn):
+    """Shared retrieval logic for /query and /query_stream."""
     _top_k = q.top_k or settings.TOP_K
     _thr = q.sim_threshold or settings.SIM_THRESHOLD
-
     # --- input validation for filter ---
     if q.filter is not None and not isinstance(q.filter, dict):
         raise HTTPException(
             status_code=400,
             detail="`filter` must be a plain dict or null, following Pinecone metadata filter syntax."
         )
-
-    # --- step 1: retrieve ---
-    try:
-        res = search(q.collection, q.question, _top_k, filter=q.filter)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Vector search failed: {type(e).__name__}: {e}"
-        )
-
-    if not res or not res.get("documents"):
-        payload = {
-            "answer": "Sorry, that topic is not present in the provided document.",
-            "matches": [],
-        }
-        if q.suggest_search:
-            import urllib.parse as u
-            payload["suggested_search"] = f"https://www.google.com/search?q={u.quote(q.question)}"
-        return JSONResponse(payload)
-
-    docs = res["documents"][0] or []
-    metas = res["metadatas"][0] or []
+    res = search(q.collection, q.question, _top_k, filter=q.filter)
+    docs = res["documents"][0] if res and res.get("documents") else []
+    metas = res["metadatas"][0] if res and res.get("metadatas") else []
     dists = res.get("distances", [[]])[0] if "distances" in res else None
-
-    # --- step 2: filter by similarity ---
     pairs = []
-    try:
-        for i, doc in enumerate(docs):
-            sim = 1.0 - dists[i] if dists and i < len(dists) else 1.0
-            if sim >= _thr:
-                pairs.append((doc, metas[i], sim))
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Post-processing results failed: {type(e).__name__}: {e}"
-        )
+    for i, doc in enumerate(docs):
+        sim = 1.0 - dists[i] if dists and i < len(dists) else 1.0
+        if sim >= _thr:
+            pairs.append((doc, metas[i], sim))
+    return pairs
 
+
+def sse_event(event: str, data: dict):
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@app.post("/query")
+async def query(q: QueryIn):
+    pairs = retrieve_context(q)
     if not pairs:
         payload = {
             "answer": "Sorry, that topic is not present in the provided document.",
@@ -319,61 +257,18 @@ async def query(q: QueryIn):
 
 @app.post("/peek")
 async def peek(q: QueryIn):
-    # --- input validation for filter ---
-    if q.filter is not None and not isinstance(q.filter, dict):
-        raise HTTPException(
-            status_code=400,
-            detail="`filter` must be a plain dict or null, following Pinecone metadata filter syntax."
-        )
-
-    res = search(q.collection, q.question,
-                 q.top_k or settings.TOP_K, filter=q.filter)
-    docs = res.get("documents", [[]])[0]
-    metas = res.get("metadatas", [[]])[0]
-    dists = res.get("distances", [[]])[0]
-
+    pairs = retrieve_context(q)
     previews = []
-    for i, doc in enumerate(docs):
-        # If doc is a dict, extract the text field; else use as is
-        if isinstance(doc, dict):
-            text = doc.get("text", "")
-        else:
-            text = doc
-        sim = 1.0 - dists[i]
+    for d, m, sim in pairs:
+        text = d.get("text", "") if isinstance(d, dict) else d
         previews.append({
             "similarity": round(sim, 3),
-            "chunk_index": metas[i].get("chunk_index") if i < len(metas) else None,
-            "source": metas[i].get("source") if i < len(metas) else None,
-            "page": metas[i].get("page") if i < len(metas) else None,
+            "chunk_index": m.get("chunk_index"),
+            "source": m.get("source"),
+            "page": m.get("page"),
             "text_preview": text[:200] + ("..." if len(text) > 200 else "")
         })
-
     return {"top_hits": previews}
-
-
-@app.get("/health")
-def health():
-    return {"ok": True}
-
-
-def retrieve_context(q: QueryIn):
-    """Shared retrieval logic for /query and /query_stream."""
-    _top_k = q.top_k or settings.TOP_K
-    _thr = q.sim_threshold or settings.SIM_THRESHOLD
-    res = search(q.collection, q.question, _top_k)
-    docs = res["documents"][0] if res and res.get("documents") else []
-    metas = res["metadatas"][0] if res and res.get("metadatas") else []
-    dists = res.get("distances", [[]])[0] if "distances" in res else None
-    pairs = []
-    for i, doc in enumerate(docs):
-        sim = 1.0 - dists[i] if dists and i < len(dists) else 1.0
-        if sim >= _thr:
-            pairs.append((doc, metas[i], sim))
-    return pairs
-
-
-def sse_event(event: str, data: dict):
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 @app.post("/query_stream")
@@ -414,7 +309,6 @@ async def query_stream(q: QueryIn, request: Request):
             try:
                 # Try Gemini streaming if available
                 # If not, fallback to chunked simulation
-                answer_chunks = []
                 model_streaming_supported = False
                 if hasattr(answer_with_context, "stream"):
                     # If your answer_with_context supports streaming, use it

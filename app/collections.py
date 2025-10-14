@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from app.vectors import index
 from typing import List
@@ -18,24 +18,25 @@ class CollectionDeleteOut(BaseModel):
     ok: bool
 
 
+def get_namespaces():
+    stats = index.describe_index_stats()
+    return stats.get("namespaces", {})
+
+
 @router.get("/", response_model=CollectionListOut)
 def list_collections():
-    stats = index.describe_index_stats()
-    namespaces = stats.get("namespaces", {})
-    collections = []
-    for name, ns in namespaces.items():
-        collections.append({
-            "name": name,
-            "vector_count": ns.get("vector_count", 0)
-        })
+    namespaces = get_namespaces()
+    collections = [
+        {"name": name, "vector_count": ns.get("vector_count", 0)}
+        for name, ns in namespaces.items()
+    ]
     return {"collections": collections}
 
 
 @router.post("/", response_model=CollectionCreate)
 def create_collection(body: CollectionCreate):
     # Pinecone namespaces are logical; nothing to pre-create.
-    stats = index.describe_index_stats()
-    namespaces = stats.get("namespaces", {})
+    namespaces = get_namespaces()
     if body.name in namespaces:
         print(f"[collections] Collection '{body.name}' already exists.")
         return body
@@ -46,8 +47,7 @@ def create_collection(body: CollectionCreate):
 
 @router.delete("/{name}", response_model=CollectionDeleteOut)
 def delete_collection(name: str):
-    stats = index.describe_index_stats()
-    namespaces = stats.get("namespaces", {})
+    namespaces = get_namespaces()
     if name not in namespaces:
         raise HTTPException(status_code=404, detail="Collection not found")
     index.delete(namespace=name, delete_all=True)
@@ -57,11 +57,12 @@ def delete_collection(name: str):
 
 @router.get("/{name}/sources")
 def collection_sources(name: str):
-    stats = index.describe_index_stats()
-    namespaces = stats.get("namespaces", {})
+    namespaces = get_namespaces()
     if name not in namespaces:
         raise HTTPException(status_code=404, detail="Collection not found")
     # Per-source breakdown is not available without scanning all vectors.
     # For now, return not implemented.
-    return {"detail": "Per-source breakdown not implemented. Only vector_count is available.",
-            "vector_count": namespaces[name].get("vector_count", 0)}
+    return {
+        "detail": "Per-source breakdown not implemented. Only vector_count is available.",
+        "vector_count": namespaces[name].get("vector_count", 0)
+    }
