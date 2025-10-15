@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from app.vectors import index
+from src.vectors import index
 from typing import List
 
 router = APIRouter(prefix="/collections", tags=["collections"])

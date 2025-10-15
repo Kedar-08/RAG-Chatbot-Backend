@@ -1,0 +1,19 @@
+# Google AI
+GOOGLE_API_KEY=your_google_api_key
+
+# Embedding & generation models
+EMBED_MODEL= add_your_embedding_model_name
+GEN_MODEL= add_your_generation_model_name
+
+# --- Pinecone (serverless) ---
+PINECONE_API_KEY= your_pinecone_api_key
+PINECONE_INDEX= pincone_index_name
+PINECONE_CLOUD=selected_cloud_provider_in_pinecone
+PINECONE_REGION=selected_region_in_pinecone
+
+# --- RAG knobs (safe defaults) ---
+# add values which suit your use case as of now we have set some defaults
+TOP_K=8
+SIM_THRESHOLD=0.5
+CHUNK_SIZE=900
+CHUNK_OVERLAP=300

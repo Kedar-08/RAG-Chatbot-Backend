@@ -5,3 +5,4 @@ pymupdf==1.24.9
 google-genai==0.3.0
 pydantic==2.9.1
 pinecone>=7.0.0
+python-multipart==0.0.20

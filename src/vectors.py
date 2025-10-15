@@ -1,5 +1,5 @@
 from typing import List
-from app.config import settings
+from src.config import settings
 from google import genai
 from pinecone import Pinecone, ServerlessSpec
 

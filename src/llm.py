@@ -1,5 +1,5 @@
 from typing import List, Tuple
-from app.config import settings
+from src.config import settings
 from google import genai
 
 client = genai.Client(api_key=settings.GOOGLE_API_KEY)

@@ -4,20 +4,20 @@ from fastapi import status
 from pydantic import BaseModel
 from pathlib import Path
 from typing import List
-from app.cors import setup_cors
-from app import pdf, chunk
-from app.vectors import upsert_chunks, search
-from app.config import settings
-from app.llm import answer_with_context
+from src.cors import setup_cors
+from src import pdf, chunk
+from src.vectors import upsert_chunks, search
+from src.config import settings
+from src.llm import answer_with_context
 import json
 import asyncio
-from app.collections import router as collections_router
+from src.collections import router as collections_router
 
-app = FastAPI(title="RAG x Gemini (Pinecone)", version="0.1.0")
+apps = FastAPI(title="RAG x Gemini (Pinecone)", version="0.1.0")
 
-setup_cors(app)
+setup_cors(apps)
 
-app.include_router(collections_router)
+apps.include_router(collections_router)
 
 UPLOAD_DIR = Path("data/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -43,7 +43,7 @@ class IngestTextIn(BaseModel):
     source: str | None = "inline"
 
 
-@app.post(
+@apps.post(
     "/ingest",
     summary="Ingest one or more PDF files into a collection",
     description="Upload one or more PDF files. Each file is chunked and indexed. Returns per-file status and total chunks.",
@@ -192,7 +192,7 @@ def sse_event(event: str, data: dict):
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-@app.post("/query")
+@apps.post("/query")
 async def query(q: QueryIn):
     pairs = retrieve_context(q)
     if not pairs:
@@ -255,23 +255,23 @@ async def query(q: QueryIn):
     return {"answer": answer, "citations": sorted_citations}
 
 
-@app.post("/peek")
-async def peek(q: QueryIn):
-    pairs = retrieve_context(q)
-    previews = []
-    for d, m, sim in pairs:
-        text = d.get("text", "") if isinstance(d, dict) else d
-        previews.append({
-            "similarity": round(sim, 3),
-            "chunk_index": m.get("chunk_index"),
-            "source": m.get("source"),
-            "page": m.get("page"),
-            "text_preview": text[:200] + ("..." if len(text) > 200 else "")
-        })
-    return {"top_hits": previews}
+# @app.post("/peek")
+# async def peek(q: QueryIn):
+#     pairs = retrieve_context(q)
+#     previews = []
+#     for d, m, sim in pairs:
+#         text = d.get("text", "") if isinstance(d, dict) else d
+#         previews.append({
+#             "similarity": round(sim, 3),
+#             "chunk_index": m.get("chunk_index"),
+#             "source": m.get("source"),
+#             "page": m.get("page"),
+#             "text_preview": text[:200] + ("..." if len(text) > 200 else "")
+#         })
+#     return {"top_hits": previews}
 
 
-@app.post("/query_stream")
+@apps.post("/query_stream")
 async def query_stream(q: QueryIn, request: Request):
     async def event_generator():
         try:
@@ -341,3 +341,22 @@ async def query_stream(q: QueryIn, request: Request):
         "Connection": "keep-alive",
     }
     return StreamingResponse(event_generator(), headers=headers)
+
+
+@app.post("/ingest_text")
+async def ingest_text(body: IngestTextIn):
+    t = (body.text or "").strip()
+    if len(t) < 50:
+        raise HTTPException(
+            400, "Text too short; need at least ~50 characters.")
+    chunks = chunk.chunk_text(t, settings.CHUNK_SIZE, settings.CHUNK_OVERLAP)
+    if not chunks:
+        raise HTTPException(
+            400, "Chunking produced no chunks from provided text.")
+    try:
+        upsert_chunks(body.collection, chunks, body.source or "inline")
+    except Exception as e:
+        raise HTTPException(
+            500, f"Vector upsert failed: {type(e).__name__}: {e}")
+    return {"ok": True, "collection": body.collection, "source": body.source, "chunks": len(chunks)}
+
