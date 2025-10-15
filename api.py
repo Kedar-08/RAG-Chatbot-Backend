@@ -343,7 +343,7 @@ async def query_stream(q: QueryIn, request: Request):
     return StreamingResponse(event_generator(), headers=headers)
 
 
-@app.post("/ingest_text")
+@apps.post("/ingest_text")
 async def ingest_text(body: IngestTextIn):
     t = (body.text or "").strip()
     if len(t) < 50:
